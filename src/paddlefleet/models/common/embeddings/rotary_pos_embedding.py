@@ -354,6 +354,14 @@ class MultimodalRotaryEmbedding(nn.Layer):
             )
         )
 
+        # ``inv_freq`` is a precision-critical constant, not a weight: with
+        # rotary_base=1e7 the smallest frequencies need far more mantissa than
+        # BF16 provides. paddle.amp.decorate(level="O2") walks every sublayer
+        # and casts float buffers to the AMP dtype unless the layer opts out,
+        # which silently truncated the mRoPE table and perturbed every rotated
+        # query/key. RotaryEmbedding above already opts out; do the same here.
+        self._cast_to_low_precision = False
+
     def forward(
         self, position_ids: paddle.Tensor, mrope_section: list[int]
     ) -> Tensor:
