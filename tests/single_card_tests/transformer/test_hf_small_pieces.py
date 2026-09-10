@@ -126,7 +126,14 @@ class TestHFQKScores(unittest.TestCase):
 
 
 class TestMultimodalRotaryNoLowPrecisionCast(unittest.TestCase):
-    """``inv_freq`` must survive ``paddle.amp.decorate(level="O2")``."""
+    """``inv_freq`` must survive ``paddle.amp.decorate(level="O2")`` under "hf".
+
+    The opt-out is gated on the accuracy target rather than unconditional: the
+    phase error it removes is ``position * 4e-3``, i.e. radians rather than ULPs
+    after a few thousand tokens, so enabling it for everyone changes the rotation
+    of every existing mRoPE run -- which moved the qwen3vl CI loss. The default and
+    Megatron paths therefore keep AMP's cast, and only the HF target opts out.
+    """
 
     def _build(self, **kwargs):
         from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
@@ -140,14 +147,31 @@ class TestMultimodalRotaryNoLowPrecisionCast(unittest.TestCase):
             mock_ps.get_context_parallel_group.return_value = None
             return MultimodalRotaryEmbedding(**kwargs)
 
-    def test_opts_out_of_amp_buffer_cast(self):
-        """The flag AMP's ``decorate`` honours must be False on this layer."""
+    def test_opts_out_of_amp_buffer_cast_under_hf(self):
+        """The flag AMP's ``decorate`` honours must be False on the HF target."""
         rope = self._build(
-            head_dim=64, rotary_percent=1.0, rotary_base=10000000
+            head_dim=64,
+            rotary_percent=1.0,
+            rotary_base=10000000,
+            use_accuracy_compatible="hf",
         )
         self.assertIs(rope._cast_to_low_precision, False)
 
-    def test_matches_the_plain_rotary_embedding_opt_out(self):
+    def test_default_and_megatron_keep_the_amp_cast(self):
+        """No numerical change for runs that never asked for the HF reference."""
+        for target in (False, True, "megatron"):
+            with self.subTest(target=target):
+                rope = self._build(
+                    head_dim=64,
+                    rotary_percent=1.0,
+                    rotary_base=10000000,
+                    use_accuracy_compatible=target,
+                )
+                # ``nn.Layer.__init__`` sets this to True; the guard must leave
+                # that alone so AMP keeps casting exactly as it did before.
+                self.assertIs(rope._cast_to_low_precision, True)
+
+    def test_matches_the_plain_rotary_embedding_opt_out_under_hf(self):
         """Both rotary layers hold precision-critical buffers, not weights."""
         from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
             RotaryEmbedding,
@@ -162,7 +186,10 @@ class TestMultimodalRotaryNoLowPrecisionCast(unittest.TestCase):
                 head_dim=64, rotary_percent=1.0, rotary_base=10000000
             )
         mrope = self._build(
-            head_dim=64, rotary_percent=1.0, rotary_base=10000000
+            head_dim=64,
+            rotary_percent=1.0,
+            rotary_base=10000000,
+            use_accuracy_compatible="hf",
         )
         self.assertIs(plain._cast_to_low_precision, False)
         self.assertIs(mrope._cast_to_low_precision, False)
